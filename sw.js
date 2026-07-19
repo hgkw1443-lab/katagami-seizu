@@ -1,6 +1,6 @@
 'use strict';
 
-const CACHE = 'pattern-v7';
+const CACHE = 'pattern-v8';
 const ASSETS = [
   './',
   './index.html',

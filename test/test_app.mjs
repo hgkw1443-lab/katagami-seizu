@@ -368,6 +368,39 @@ const restoredCount = await evaluate(`applyBackupData(${backupJson})`);
 check('バックアップから復元できる',
   restoredCount >= 1 && (await evaluate("JSON.parse(localStorage.getItem('pattern:' + drawing.id)).lines.length")) === 14);
 
+// --- 寸法線ツール ---
+await evaluate("document.getElementById('btnDim').click()");
+check('寸法モードに切替', (await evaluate('mode')) === 'dim');
+// ペンドラッグ: 四角形の上辺の両端を測る（少しずれた位置から端点に吸着）
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const p1 = mmToScreen(72, 168), p2 = mmToScreen(368, 172);
+  const opts = (x, y) => ({ pointerId: 80, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(p1.x, p1.y)));
+  canvas.dispatchEvent(new PointerEvent('pointermove', opts(p2.x, p2.y)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(p2.x, p2.y)));
+})()`);
+const dimLine = await evaluate("JSON.stringify((() => { const l = drawing.lines[drawing.lines.length-1]; return [l.x1,l.y1,l.x2,l.y2,l.style]; })())");
+check('ペンドラッグで寸法線が引ける（端点に吸着）',
+  dimLine === JSON.stringify([70, 170, 370, 170, 'dim']), dimLine);
+check('寸法線に矢じりが描画される', (await evaluate("linesLayer.querySelectorAll('path').length")) === 2);
+// 線の中点→対角の角（中点吸着）
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const p1 = mmToScreen(222, 168), p2 = mmToScreen(368, 368);
+  const opts = (x, y) => ({ pointerId: 81, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(p1.x, p1.y)));
+  canvas.dispatchEvent(new PointerEvent('pointermove', opts(p2.x, p2.y)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(p2.x, p2.y)));
+})()`);
+const dimLine2 = await evaluate("JSON.stringify((() => { const l = drawing.lines[drawing.lines.length-1]; return [l.x1,l.y1,l.x2,l.y2,l.style]; })())");
+check('寸法線が線の中点にも吸着する', dimLine2 === JSON.stringify([220, 170, 370, 370, 'dim']), dimLine2);
+check('寸法線は縫い代のループ判定に影響しない', await evaluate('!!traceLoop(drawing.lines[2])'));
+check('寸法線入りでもPNG書き出しが動く',
+  (await evaluate("(() => { try { exportPNG(); return true; } catch (e) { return false; } })()")) === true);
+await evaluate("document.getElementById('btnDim').click()");
+check('寸法ボタン再タップでdrawモードに戻る', (await evaluate('mode')) === 'draw');
+
 // --- 実ポインタイベント経路（タップ・パン・ピンチ） ---
 await evaluate("pending = null; selectedIds = []; mode = 'draw'; render()");
 await evaluate(`(() => {

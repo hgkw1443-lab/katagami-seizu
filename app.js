@@ -23,7 +23,7 @@ const ZOOM_MIN = 0.3, ZOOM_MAX = 20;
 let drawing = null;                        // { id, name, lines, updatedAt, view }
 let view = { panX: -30, panY: -30, zoom: 2 }; // panX/panY: viewBox左上(mm), zoom: px/mm
 // 入力の役割分担: ペン（とマウス）=描く、指=表示移動・選択
-let mode = 'draw';                         // 'draw' | 'rect'
+let mode = 'draw';                         // 'draw' | 'rect' | 'dim'
 let currentStyle = 'solid';                // 'solid' | 'dashed'
 let selectedIds = [];                      // 選択中の線ID（複数可）
 let marquee = null;                        // 範囲選択ドラッグ中の矩形 { x1,y1,x2,y2 } (mm)
@@ -86,14 +86,19 @@ function distToSegment(p, a, b) {
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
 
-// 画面距離で最寄りの既存端点を探す（吸着圏内になければnull）。縫い代線は対象外
+// 今から引く線に付ける線種（寸法モードなら 'dim'）
+function drawStyle() {
+  return mode === 'dim' ? 'dim' : currentStyle;
+}
+
+// 画面距離で最寄りの既存端点を探す（吸着圏内になければnull）。縫い代線・寸法線は対象外
 // exclude: 除外する線ID（文字列1つ or Set）
 function nearestEndpoint(mm, exclude) {
   const excl = exclude instanceof Set ? exclude : (exclude ? new Set([exclude]) : null);
   let best = null, bestD = SNAP_ENDPOINT_PX;
   const cur = mmToScreen(mm.x, mm.y);
   for (const l of drawing.lines) {
-    if ((excl && excl.has(l.id)) || l.style === 'seam') continue;
+    if ((excl && excl.has(l.id)) || l.style === 'seam' || l.style === 'dim') continue;
     for (const p of [{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]) {
       const s = mmToScreen(p.x, p.y);
       const d = Math.hypot(s.x - cur.x, s.y - cur.y);
@@ -103,10 +108,30 @@ function nearestEndpoint(mm, exclude) {
   return best;
 }
 
-// タップ位置(mm)をスナップ: 既存端点 > グリッド交点 > 1mm丸め
+// 最寄りの線の中点を探す（寸法モードで「端から真ん中まで」を測るため）
+function nearestMidpoint(mm, exclude) {
+  const excl = exclude instanceof Set ? exclude : (exclude ? new Set([exclude]) : null);
+  let best = null, bestD = SNAP_ENDPOINT_PX;
+  const cur = mmToScreen(mm.x, mm.y);
+  for (const l of drawing.lines) {
+    if ((excl && excl.has(l.id)) || l.style === 'seam' || l.style === 'dim') continue;
+    const px = (l.x1 + l.x2) / 2, py = (l.y1 + l.y2) / 2;
+    const s = mmToScreen(px, py);
+    const d = Math.hypot(s.x - cur.x, s.y - cur.y);
+    if (d < bestD) { bestD = d; best = { x: round1(px), y: round1(py) }; }
+  }
+  return best;
+}
+
+// タップ位置(mm)をスナップ: 既存端点 >（寸法モードは線の中点も）> グリッド交点 > 1mm丸め
 function snapPoint(mm, excludeLineId) {
   const best = nearestEndpoint(mm, excludeLineId);
   if (best) return best;
+
+  if (mode === 'dim') {
+    const mid = nearestMidpoint(mm, excludeLineId);
+    if (mid) return mid;
+  }
 
   const gx = Math.round(mm.x / GRID) * GRID;
   const gy = Math.round(mm.y / GRID) * GRID;
@@ -228,15 +253,35 @@ function renderLines() {
   for (const l of drawing.lines) {
     const sel = selectedIds.includes(l.id);
     const seam = l.style === 'seam';
+    const dim = l.style === 'dim';
+    const color = sel ? '#0a84ff' : dim ? '#2e7d32' : seam ? '#8f8f8f' : '#2b2b2b';
     const attrs = {
       x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2,
-      stroke: sel ? '#0a84ff' : (seam ? '#8f8f8f' : '#2b2b2b'),
-      'stroke-width': (sel ? 3 : seam ? 1.2 : 1.8) / view.zoom,
+      stroke: color,
+      'stroke-width': (sel ? 3 : (seam || dim) ? 1.2 : 1.8) / view.zoom,
       'stroke-linecap': 'round',
     };
     if (l.style === 'dashed') attrs['stroke-dasharray'] = `${8 / view.zoom} ${6 / view.zoom}`;
     linesLayer.appendChild(svgEl('line', attrs));
-    addLabel(l, sel ? '#0a84ff' : seam ? '#8f8f8f' : '#c0392b');
+    if (dim) addDimArrows(linesLayer, l, color);
+    addLabel(l, sel ? '#0a84ff' : dim ? '#2e7d32' : seam ? '#8f8f8f' : '#c0392b');
+  }
+}
+
+// 寸法線の両端に矢じりを描く
+function addDimArrows(layer, l, color) {
+  const len = lineLength(l);
+  if (len < 0.5) return;
+  const ux = (l.x2 - l.x1) / len, uy = (l.y2 - l.y1) / len;
+  const ah = 9 / view.zoom, aw = 3.5 / view.zoom; // 矢じりの長さ・半幅
+  for (const [px, py, dx, dy] of [[l.x1, l.y1, ux, uy], [l.x2, l.y2, -ux, -uy]]) {
+    const bx = px + dx * ah, by = py + dy * ah;
+    const nx = -dy, ny = dx;
+    layer.appendChild(svgEl('path', {
+      d: `M ${bx + nx * aw} ${by + ny * aw} L ${px} ${py} L ${bx - nx * aw} ${by - ny * aw}`,
+      fill: 'none', stroke: color,
+      'stroke-width': 1.2 / view.zoom, 'stroke-linejoin': 'round',
+    }));
   }
 }
 
@@ -354,6 +399,7 @@ function addLabelTo(layer, l) {
 
 function updateToolbar() {
   $('btnRect').classList.toggle('active', mode === 'rect');
+  $('btnDim').classList.toggle('active', mode === 'dim');
   $('btnSolid').classList.toggle('active', currentStyle === 'solid');
   $('btnDashed').classList.toggle('active', currentStyle === 'dashed');
   $('btnUndo').disabled = historyIndex <= 0;
@@ -379,6 +425,8 @@ function updateToolbar() {
   let hint;
   if (mode === 'rect') {
     hint = 'ペン: ドラッグで四角形、タップで寸法入力。指: 表示移動・線の選択';
+  } else if (mode === 'dim') {
+    hint = '寸法: ペンで測りたい区間をドラッグ（線の端・中央に吸着）。タップ2回でも可';
   } else if (pending && !pending.hasEnd) {
     hint = 'ペンで終点をタップすると線が確定（長さ入力も可）。指タップで起点を解除';
   } else if (pending) {
@@ -646,7 +694,7 @@ function handleDrawTap(pos) {
       id: uid(),
       x1: round1(pending.x1), y1: round1(pending.y1),
       x2: round1(p.x), y2: round1(p.y),
-      style: currentStyle,
+      style: drawStyle(),
     });
     pending = null;
     commit();
@@ -667,7 +715,7 @@ function finishLineDrag() {
     id: uid(),
     x1: round1(p.x1), y1: round1(p.y1),
     x2: round1(p.x2), y2: round1(p.y2),
-    style: currentStyle,
+    style: drawStyle(),
   });
   commit();
 }
@@ -682,7 +730,7 @@ function hitLine(mm) {
 }
 function selectLine(l) {
   selectedIds = l ? [l.id] : [];
-  if (l && l.style !== 'seam') currentStyle = l.style; // 線種トグルに選択線の状態を反映
+  if (l && l.style !== 'seam' && l.style !== 'dim') currentStyle = l.style; // 線種トグルに選択線の状態を反映
   render();
 }
 // 1本だけ選択しているときその線を返す（0本・複数ならnull）
@@ -715,7 +763,7 @@ $('btnConfirm').addEventListener('click', () => {
     id: uid(),
     x1: round1(pending.x1), y1: round1(pending.y1),
     x2: round1(pending.x2), y2: round1(pending.y2),
-    style: currentStyle,
+    style: drawStyle(),
   });
   pending = null;
   commit();
@@ -877,6 +925,15 @@ $('btnRect').addEventListener('click', () => {
   render();
 });
 
+// ===== 寸法ツール =====
+$('btnDim').addEventListener('click', () => {
+  mode = (mode === 'dim') ? 'draw' : 'dim';
+  pending = null;
+  selectedIds = [];
+  rectPending = null;
+  render();
+});
+
 // 四角形モードでタップ → その点を左上角として寸法入力パネルを開く
 function handleRectTap(pos) {
   rectAnchor = snapPoint(screenToMm(pos.x, pos.y));
@@ -939,7 +996,7 @@ $('btnRectCreate').addEventListener('click', () => {
 // ===== 縫い代／内側線の自動生成 =====
 $('btnSeam').addEventListener('click', () => {
   const sel = singleSel();
-  if (!sel || sel.style === 'seam') {
+  if (!sel || sel.style === 'seam' || sel.style === 'dim') {
     alert('線を1本タップで選択してから押してください');
     return;
   }
@@ -984,12 +1041,12 @@ $('btnSeamCreate').addEventListener('click', () => {
   commit();
 });
 
-// 選択した線から端点同士がつながった閉じたループをたどる（縫い代線は無視）
+// 選択した線から端点同士がつながった閉じたループをたどる（縫い代線・寸法線は無視）
 function traceLoop(startLine) {
   const key = (x, y) => x + ',' + y;
   const map = new Map();
   for (const l of drawing.lines) {
-    if (l.style === 'seam') continue;
+    if (l.style === 'seam' || l.style === 'dim') continue;
     for (const k of [key(l.x1, l.y1), key(l.x2, l.y2)]) {
       if (!map.has(k)) map.set(k, []);
       map.get(k).push(l);
@@ -1138,14 +1195,33 @@ function exportPNG() {
   // 線
   for (const l of drawing.lines) {
     const seam = l.style === 'seam';
-    ctx.strokeStyle = seam ? '#8f8f8f' : '#222';
-    ctx.lineWidth = seam ? Math.max(1, scale * 0.3) : Math.max(1.5, scale * 0.5);
+    const dim = l.style === 'dim';
+    ctx.strokeStyle = dim ? '#2e7d32' : seam ? '#8f8f8f' : '#222';
+    ctx.lineWidth = (seam || dim) ? Math.max(1, scale * 0.3) : Math.max(1.5, scale * 0.5);
     ctx.lineCap = 'round';
     ctx.setLineDash(l.style === 'dashed' ? [scale * 4, scale * 3] : []);
     ctx.beginPath();
     ctx.moveTo(X(l.x1), Y(l.y1));
     ctx.lineTo(X(l.x2), Y(l.y2));
     ctx.stroke();
+    if (dim) {
+      // 両端の矢じり
+      const len = lineLength(l);
+      if (len >= 0.5) {
+        const ux = (l.x2 - l.x1) / len, uy = (l.y2 - l.y1) / len;
+        const ah = 4, aw = 1.5; // mm
+        ctx.setLineDash([]);
+        for (const [px, py, dx, dy] of [[l.x1, l.y1, ux, uy], [l.x2, l.y2, -ux, -uy]]) {
+          const bx = px + dx * ah, by = py + dy * ah;
+          const nx = -dy, ny = dx;
+          ctx.beginPath();
+          ctx.moveTo(X(bx + nx * aw), Y(by + ny * aw));
+          ctx.lineTo(X(px), Y(py));
+          ctx.lineTo(X(bx - nx * aw), Y(by - ny * aw));
+          ctx.stroke();
+        }
+      }
+    }
   }
   ctx.setLineDash([]);
 
@@ -1153,7 +1229,7 @@ function exportPNG() {
   ctx.font = `${scale * 4}px -apple-system, sans-serif`;
   ctx.textAlign = 'center';
   for (const l of drawing.lines) {
-    ctx.fillStyle = l.style === 'seam' ? '#8f8f8f' : '#c0392b';
+    ctx.fillStyle = l.style === 'dim' ? '#2e7d32' : l.style === 'seam' ? '#8f8f8f' : '#c0392b';
     const mx = (X(l.x1) + X(l.x2)) / 2, my = (Y(l.y1) + Y(l.y2)) / 2;
     let rot = Math.atan2(l.y2 - l.y1, l.x2 - l.x1);
     if (rot > Math.PI / 2 || rot <= -Math.PI / 2) rot += Math.PI;
