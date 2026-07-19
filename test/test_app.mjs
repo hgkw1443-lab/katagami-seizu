@@ -1,15 +1,4 @@
 // ヘッドレスEdge(CDP)で型紙アプリの主要フローを検証する
-//
-// 使い方:
-//   1. ローカル配信:  python -m http.server 8123  （アプリのフォルダで）
-//   2. ヘッドレスEdge起動:
-//      msedge --headless=new --remote-debugging-port=9333 --no-first-run --disable-gpu \
-//             --disable-sync --disable-extensions --window-size=1180,820 \
-//             --user-data-dir=<空のテンポラリフォルダ> about:blank
-//   3. node test_app.mjs           （APP_URL環境変数で公開URLにも向けられる）
-//
-// 注意: 非アクティブタブはレイアウト幅が0になりrender()が動かないため、
-//       テスト冒頭で Page.bringToFront を送っている。
 const CDP_PORT = 9333;
 const APP_URL = process.env.APP_URL || 'http://127.0.0.1:8123/';
 
@@ -202,6 +191,65 @@ await evaluate('exportPNG()');
 await sleep(600);
 const errors2 = events.filter((e) => e.method === 'Runtime.exceptionThrown');
 check('PNG書き出しでエラーなし', errors2.length === 0, JSON.stringify(errors2.slice(0, 1)));
+
+// --- 描画モードでの線選択・移動 ---
+await evaluate(`handleDrawTap((() => { const l = drawing.lines[0]; return mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2); })())`);
+check('描画モードで線タップ→選択される', await evaluate('selectedId === drawing.lines[0].id && !pending'));
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const l = drawing.lines[0];
+  const s = mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2);
+  const opts = (x, y) => ({ pointerId: 30, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(s.x, s.y)));
+  canvas.dispatchEvent(new PointerEvent('pointermove', opts(s.x + 40, s.y + 20)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(s.x + 40, s.y + 20)));
+})()`);
+check('描画モードのまま線をドラッグで移動できる',
+  await evaluate('drawing.lines[0].x1 === 90 && drawing.lines[0].y1 === 80'),
+  await evaluate('JSON.stringify([drawing.lines[0].x1, drawing.lines[0].y1])'));
+await evaluate('handleDrawTap({x:1000, y:600})');
+check('空きタップで選択解除して起点が置かれる', await evaluate('!selectedId && pending && !pending.hasEnd'));
+await evaluate("document.getElementById('btnCancel').click()");
+await evaluate("document.getElementById('btnUndo').click()"); // 移動を元に戻す
+
+// --- 四角形ツール ---
+await evaluate("document.getElementById('btnSolid').click()");
+await evaluate('handleDrawTap({x:200, y:400})'); // 起点 (70,170)
+await evaluate("document.getElementById('btnRect').click()");
+await evaluate(`(() => {
+  document.getElementById('inpRectW').value = '300';
+  document.getElementById('inpRectH').value = '200';
+  document.getElementById('btnRectCreate').click();
+})()`);
+check('四角形が4本の線で作成される', (await evaluate('drawing.lines.length')) === 6);
+const rectCoords = await evaluate("JSON.stringify(drawing.lines.slice(2).map(l => [l.x1,l.y1,l.x2,l.y2,l.style]))");
+check('四角形の座標が正しい（起点が左上角）',
+  rectCoords === JSON.stringify([[70,170,370,170,'solid'],[370,170,370,370,'solid'],[370,370,70,370,'solid'],[70,370,70,170,'solid']]),
+  rectCoords);
+
+// --- 縫い代の自動生成 ---
+await evaluate('handleMoveTap(mmToScreen(220, 170))'); // 四角形の上辺を選択
+check('四角形の辺を選択できる', await evaluate('!!selectedId'));
+await evaluate("window.prompt = () => '10'"); // 幅入力ダイアログをスタブ
+await evaluate("document.getElementById('btnSeam').click()");
+check('縫い代線が4本追加される',
+  await evaluate("drawing.lines.length === 10 && drawing.lines.slice(6).every(l => l.style === 'seam')"));
+const seamPts = await evaluate("JSON.stringify(drawing.lines.filter(l => l.style==='seam').flatMap(l => [[l.x1,l.y1],[l.x2,l.y2]]).map(p => p.join(',')).sort())");
+const expSeam = JSON.stringify(['60,160','60,160','60,380','60,380','380,160','380,160','380,380','380,380'].sort());
+check('縫い代が10mm外側にオフセットされる', seamPts === expSeam, seamPts);
+check('縫い代込みでもPNG書き出しが動く',
+  (await evaluate("(() => { try { exportPNG(); return true; } catch (e) { return false; } })()")) === true);
+
+// --- バックアップ（書き出し／読み込み） ---
+const backupJson = await evaluate('JSON.stringify(buildBackupData())');
+const backup = JSON.parse(backupJson);
+check('バックアップデータが生成できる',
+  backup.app === 'katagami-seizu' && backup.drawings.length >= 1 && backup.drawings.some((d) => d.lines && d.lines.length === 10));
+await evaluate("(() => { localStorage.removeItem('pattern:' + drawing.id); saveIndex(loadIndex().filter(e => e.id !== drawing.id)); })()");
+check('（確認）削除でデータが消えている', (await evaluate("!!localStorage.getItem('pattern:' + drawing.id)")) === false);
+const restoredCount = await evaluate(`applyBackupData(${backupJson})`);
+check('バックアップから復元できる',
+  restoredCount >= 1 && (await evaluate("JSON.parse(localStorage.getItem('pattern:' + drawing.id)).lines.length")) === 10);
 
 // --- 実ポインタイベント経路（タップ・パン・ピンチ） ---
 await evaluate("pending = null; selectedId = null; mode = 'draw'; render()");
