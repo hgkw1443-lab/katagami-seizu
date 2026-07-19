@@ -20,10 +20,14 @@ const ZOOM_MIN = 0.3, ZOOM_MAX = 20;
 // ===== 状態 =====
 let drawing = null;                        // { id, name, lines, updatedAt, view }
 let view = { panX: -30, panY: -30, zoom: 2 }; // panX/panY: viewBox左上(mm), zoom: px/mm
-let mode = 'draw';                         // 'move' | 'draw'
+let mode = 'draw';                         // 'move' | 'draw' | 'rect'
 let currentStyle = 'solid';                // 'solid' | 'dashed'
 let selectedId = null;
 let pending = null;                        // { x1,y1, x2,y2, hasEnd }
+let rectPending = null;                    // 四角形ドラッグ中のプレビュー { x1,y1,x2,y2 }
+let rectAnchor = null;                     // 寸法入力パネル用の左上角
+let seamLoop = null;                       // 縫い代パネル用の外形ループ
+let seamDir = 'out';                       // 'out'（外側・縫い代線） | 'in'（内側・点線）
 let history = [];
 let historyIndex = -1;
 let saveTimer = null;
@@ -285,6 +289,34 @@ function renderOverlay() {
       fill: '#0a84ff', stroke: '#fff', 'stroke-width': 1.5 / z,
     }));
   }
+
+  // 四角形ドラッグのプレビュー
+  if (rectPending) {
+    const x = Math.min(rectPending.x1, rectPending.x2);
+    const y = Math.min(rectPending.y1, rectPending.y2);
+    const w = Math.abs(rectPending.x2 - rectPending.x1);
+    const h = Math.abs(rectPending.y2 - rectPending.y1);
+    overlayLayer.appendChild(svgEl('rect', {
+      x, y, width: w, height: h,
+      fill: 'rgba(10,132,255,0.06)', stroke: '#0a84ff', 'stroke-width': 2.2 / z,
+    }));
+    if (w >= 1) {
+      const tw = svgEl('text', {
+        x: x + w / 2, y: y - 6 / z,
+        'text-anchor': 'middle', 'font-size': 13 / z, fill: '#0a84ff', 'font-weight': 'bold',
+      });
+      tw.textContent = fmt(w);
+      overlayLayer.appendChild(tw);
+    }
+    if (h >= 1) {
+      const th = svgEl('text', {
+        transform: `translate(${x - 6 / z} ${y + h / 2}) rotate(-90)`,
+        'text-anchor': 'middle', 'font-size': 13 / z, fill: '#0a84ff', 'font-weight': 'bold',
+      });
+      th.textContent = fmt(h);
+      overlayLayer.appendChild(th);
+    }
+  }
 }
 
 function addLabelTo(layer, l) {
@@ -308,6 +340,7 @@ function addLabelTo(layer, l) {
 function updateToolbar() {
   $('btnMove').classList.toggle('active', mode === 'move');
   $('btnDraw').classList.toggle('active', mode === 'draw');
+  $('btnRect').classList.toggle('active', mode === 'rect');
   $('btnSolid').classList.toggle('active', currentStyle === 'solid');
   $('btnDashed').classList.toggle('active', currentStyle === 'dashed');
   $('btnUndo').disabled = historyIndex <= 0;
@@ -332,7 +365,9 @@ function updateToolbar() {
 
   // ヒント
   let hint;
-  if (mode === 'move') {
+  if (mode === 'rect') {
+    hint = 'ドラッグで四角形を作成（角から対角へ）。タップで寸法入力（2本指で表示移動）';
+  } else if (mode === 'move') {
     hint = selectedId
       ? '線をドラッグで移動、端点ハンドルで変形。長さ・角度・線種の変更、削除ができます'
       : 'ドラッグで表示移動、ピンチで拡大縮小。線をタップで選択';
@@ -392,6 +427,7 @@ canvas.addEventListener('pointerdown', (e) => {
       if (d * view.zoom < LINE_HIT_PX) { drag = 'lineBody'; startLine = { ...l }; }
     }
   }
+  if (!drag && mode === 'rect') drag = 'rectDraw'; // 四角形モード: ドラッグで対角を指定
   gesture = {
     type: 'single',
     startX: pos.x, startY: pos.y,
@@ -469,6 +505,11 @@ canvas.addEventListener('pointermove', (e) => {
     l.x1 = round1(l0.x1 + dx); l.y1 = round1(l0.y1 + dy);
     l.x2 = round1(l0.x2 + dx); l.y2 = round1(l0.y2 + dy);
     render();
+  } else if (gesture.drag === 'rectDraw') {
+    const a = snapPoint(gesture.startMm);
+    const b = snapPoint(screenToMm(pos.x, pos.y));
+    rectPending = { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+    render();
   } else if (gesture.drag === 'sel1' || gesture.drag === 'sel2') {
     const l = drawing.lines.find(x => x.id === selectedId);
     if (!l) return;
@@ -498,15 +539,19 @@ function endPointer(e) {
 
   if (g.moved) {
     if (g.drag === 'sel1' || g.drag === 'sel2' || g.drag === 'lineBody') commit(); // 移動を確定
+    else if (g.drag === 'rectDraw') finishRectDrag();
     else if (g.drag === 'pendingEnd') render();
     else scheduleSave(); // パン位置を保存
     return;
   }
+  if (g.drag === 'rectDraw') rectPending = null;
 
   // タップ
   if (e.type === 'pointercancel') return;
   const pos = eventPos(e);
-  if (mode === 'draw') {
+  if (mode === 'rect') {
+    handleRectTap(pos);
+  } else if (mode === 'draw') {
     handleDrawTap(pos);
   } else {
     handleMoveTap(pos);
@@ -577,10 +622,10 @@ function handleMoveTap(pos) {
 
 // ===== ツールバー操作 =====
 $('btnMove').addEventListener('click', () => {
-  mode = 'move'; pending = null; render();
+  mode = 'move'; pending = null; rectPending = null; render();
 });
 $('btnDraw').addEventListener('click', () => {
-  mode = 'draw'; selectedId = null; render();
+  mode = 'draw'; selectedId = null; rectPending = null; render();
 });
 $('btnSolid').addEventListener('click', () => setStyle('solid'));
 $('btnDashed').addEventListener('click', () => setStyle('dashed'));
@@ -754,24 +799,32 @@ function renderList() {
 
 // ===== 四角形ツール =====
 $('btnRect').addEventListener('click', () => {
+  mode = (mode === 'rect') ? 'draw' : 'rect';
+  pending = null;
+  selectedId = null;
+  rectPending = null;
+  render();
+});
+
+// 四角形モードでタップ → その点を左上角として寸法入力パネルを開く
+function handleRectTap(pos) {
+  rectAnchor = snapPoint(screenToMm(pos.x, pos.y));
   $('rectOverlay').classList.remove('hidden');
-});
-$('btnRectCancel').addEventListener('click', () => $('rectOverlay').classList.add('hidden'));
-$('rectOverlay').addEventListener('click', (e) => {
-  if (e.target === $('rectOverlay')) $('rectOverlay').classList.add('hidden');
-});
-$('btnRectCreate').addEventListener('click', () => {
-  const w = parseFloat($('inpRectW').value);
-  const h = parseFloat($('inpRectH').value);
-  if (!(w > 0) || !(h > 0)) { alert('幅と高さをmmで入力してください'); return; }
-  let ox, oy;
-  if (pending) {
-    ox = pending.x1; oy = pending.y1; // 置いた起点を左上角に
-  } else {
-    const cw = canvas.clientWidth, ch = canvas.clientHeight;
-    ox = Math.round((view.panX + cw / 2 / view.zoom - w / 2) / GRID) * GRID;
-    oy = Math.round((view.panY + ch / 2 / view.zoom - h / 2) / GRID) * GRID;
-  }
+}
+
+// 四角形モードのドラッグ終了 → 対角2点から四角形を作成
+function finishRectDrag() {
+  const r = rectPending;
+  rectPending = null;
+  if (!r) { render(); return; }
+  const x = Math.min(r.x1, r.x2), y = Math.min(r.y1, r.y2);
+  const w = Math.abs(r.x2 - r.x1), h = Math.abs(r.y2 - r.y1);
+  if (w < 1 || h < 1) { render(); return; } // 細すぎるものは誤操作とみなす
+  pushRectLines(x, y, w, h);
+  commit();
+}
+
+function pushRectLines(ox, oy, w, h) {
   const pts = [[ox, oy], [ox + w, oy], [ox + w, oy + h], [ox, oy + h]];
   for (let i = 0; i < 4; i++) {
     const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % 4];
@@ -781,17 +834,42 @@ $('btnRectCreate').addEventListener('click', () => {
       style: currentStyle,
     });
   }
+}
+
+$('btnRectCancel').addEventListener('click', () => {
+  rectAnchor = null;
+  $('rectOverlay').classList.add('hidden');
+});
+$('rectOverlay').addEventListener('click', (e) => {
+  if (e.target === $('rectOverlay')) { rectAnchor = null; $('rectOverlay').classList.add('hidden'); }
+});
+$('btnRectCreate').addEventListener('click', () => {
+  const w = parseFloat($('inpRectW').value);
+  const h = parseFloat($('inpRectH').value);
+  if (!(w > 0) || !(h > 0)) { alert('幅と高さをmmで入力してください'); return; }
+  let ox, oy;
+  if (rectAnchor) {
+    ox = rectAnchor.x; oy = rectAnchor.y; // タップした点を左上角に
+  } else if (pending) {
+    ox = pending.x1; oy = pending.y1;
+  } else {
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    ox = Math.round((view.panX + cw / 2 / view.zoom - w / 2) / GRID) * GRID;
+    oy = Math.round((view.panY + ch / 2 / view.zoom - h / 2) / GRID) * GRID;
+  }
+  pushRectLines(ox, oy, w, h);
   pending = null;
   selectedId = null;
+  rectAnchor = null;
   $('rectOverlay').classList.add('hidden');
   commit();
 });
 
-// ===== 縫い代の自動生成 =====
+// ===== 縫い代／内側線の自動生成 =====
 $('btnSeam').addEventListener('click', () => {
   const sel = drawing.lines.find(l => l.id === selectedId);
   if (!sel || sel.style === 'seam') {
-    alert('縫い代を付けたい外形の線を1本タップで選択してから押してください');
+    alert('線を1本タップで選択してから押してください');
     return;
   }
   const loop = traceLoop(sel);
@@ -799,19 +877,39 @@ $('btnSeam').addEventListener('click', () => {
     alert('選択した線がつながった閉じた形になっていません。\n端点同士をぴったり合わせて（吸着させて）ください');
     return;
   }
-  const wStr = prompt('縫い代の幅 (mm)', '10');
-  if (wStr === null) return;
-  const d = parseFloat(wStr);
-  if (!(d > 0)) return;
-  const out = offsetPolygon(loop, d);
+  seamLoop = loop;
+  updateSeamDirButtons();
+  $('seamOverlay').classList.remove('hidden');
+});
+$('btnSeamOut').addEventListener('click', () => { seamDir = 'out'; updateSeamDirButtons(); });
+$('btnSeamIn').addEventListener('click', () => { seamDir = 'in'; updateSeamDirButtons(); });
+function updateSeamDirButtons() {
+  $('btnSeamOut').classList.toggle('active', seamDir === 'out');
+  $('btnSeamIn').classList.toggle('active', seamDir === 'in');
+}
+$('btnSeamCancel').addEventListener('click', () => {
+  seamLoop = null;
+  $('seamOverlay').classList.add('hidden');
+});
+$('seamOverlay').addEventListener('click', (e) => {
+  if (e.target === $('seamOverlay')) { seamLoop = null; $('seamOverlay').classList.add('hidden'); }
+});
+$('btnSeamCreate').addEventListener('click', () => {
+  const d = parseFloat($('inpSeamW').value);
+  if (!(d > 0)) { alert('幅をmmで入力してください'); return; }
+  if (!seamLoop) return;
+  const out = offsetPolygon(seamLoop, seamDir === 'in' ? -d : d);
+  const style = seamDir === 'in' ? 'dashed' : 'seam'; // 内側は点線（折り・出来上がり線）
   for (let i = 0; i < out.length; i++) {
     const a = out[i], b = out[(i + 1) % out.length];
     drawing.lines.push({
       id: uid(),
       x1: round1(a.x), y1: round1(a.y), x2: round1(b.x), y2: round1(b.y),
-      style: 'seam',
+      style,
     });
   }
+  seamLoop = null;
+  $('seamOverlay').classList.add('hidden');
   commit();
 });
 

@@ -86,10 +86,26 @@
     <h2>四角形を作成</h2>
     <label>幅　 <input id="inpRectW" type="number" inputmode="decimal" min="1"><span class="unit">mm</span></label>
     <label>高さ <input id="inpRectH" type="number" inputmode="decimal" min="1"><span class="unit">mm</span></label>
-    <p class="note">先に起点をタップしてあれば、その点が左上の角になります</p>
+    <p class="note">タップした点が左上の角になります</p>
     <div class="row">
       <button id="btnRectCreate" class="primary">作成</button>
       <button id="btnRectCancel">キャンセル</button>
+    </div>
+  </div>
+</div>
+
+<div id="seamOverlay" class="hidden">
+  <div id="seamPanel">
+    <h2>縫い代・内側線を作成</h2>
+    <label>幅　 <input id="inpSeamW" type="number" inputmode="decimal" min="1" value="10"><span class="unit">mm</span></label>
+    <div class="dir-row">
+      <button id="btnSeamOut" class="tool active">外側（縫い代）</button>
+      <button id="btnSeamIn" class="tool">内側（点線）</button>
+    </div>
+    <p class="note">選択した線とつながった閉じた形の、外側または内側に平行な線を引きます</p>
+    <div class="row">
+      <button id="btnSeamCreate" class="primary">作成</button>
+      <button id="btnSeamCancel">キャンセル</button>
     </div>
   </div>
 </div>

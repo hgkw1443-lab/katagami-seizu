@@ -200,8 +200,8 @@ button.danger {
 }
 .note { font-size: 13px; color: #888; }
 
-/* ===== 四角形パネル ===== */
-#rectOverlay {
+/* ===== 四角形・縫い代パネル ===== */
+#rectOverlay, #seamOverlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.35);
@@ -210,25 +210,25 @@ button.danger {
   align-items: center;
   justify-content: center;
 }
-#rectPanel {
+#rectPanel, #seamPanel {
   background: #fff;
   border-radius: 16px;
   padding: 20px;
-  width: min(340px, 90vw);
+  width: min(360px, 90vw);
   display: flex;
   flex-direction: column;
   gap: 14px;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
 }
-#rectPanel h2 { font-size: 18px; color: #333; }
-#rectPanel label {
+#rectPanel h2, #seamPanel h2 { font-size: 18px; color: #333; }
+#rectPanel label, #seamPanel label {
   display: flex;
   align-items: center;
   gap: 8px;
   font-size: 16px;
   color: #555;
 }
-#rectPanel input[type="number"] {
+#rectPanel input[type="number"], #seamPanel input[type="number"] {
   flex: 1;
   min-height: 44px;
   font-size: 18px;
@@ -237,4 +237,6 @@ button.danger {
   border-radius: 8px;
   text-align: right;
 }
-#rectPanel .row { display: flex; gap: 10px; justify-content: flex-end; }
+#rectPanel .row, #seamPanel .row { display: flex; gap: 10px; justify-content: flex-end; }
+#seamPanel .dir-row { display: flex; gap: 8px; }
+#seamPanel .dir-row button { flex: 1; }
