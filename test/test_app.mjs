@@ -102,9 +102,7 @@ check('90°は上向き(y2<y1)', await evaluate('pending.y2 < pending.y1'));
 await evaluate("document.getElementById('btnConfirm').click()");
 check('2本目が確定', (await evaluate('drawing.lines.length')) === 2);
 
-// --- 移動モードで選択・編集 ---
-await evaluate("document.getElementById('btnMove').click()");
-check('移動モードに切替', (await evaluate('mode')) === 'move');
+// --- 選択・編集（指タップ相当） ---
 // 1本目の線の中点(画面座標)をタップ
 await evaluate(`(() => {
   const l = drawing.lines[0];
@@ -161,7 +159,6 @@ check('移動もundo対象',
   await evaluate("(() => { document.getElementById('btnUndo').click(); const v = drawing.lines[0].x1 === 110; document.getElementById('btnRedo').click(); return v && drawing.lines[0].x1 === 70; })()"));
 
 // --- 作成中プレビュー先端の端点吸着 ---
-await evaluate("document.getElementById('btnDraw').click()");
 await evaluate('handleDrawTap({x:900, y:500})');
 await evaluate("(() => { const i=document.getElementById('inpLen'); i.value='100'; i.dispatchEvent(new Event('change')); })()");
 await evaluate(`(() => {
@@ -203,24 +200,44 @@ await sleep(600);
 const errors2 = events.filter((e) => e.method === 'Runtime.exceptionThrown');
 check('PNG書き出しでエラーなし', errors2.length === 0, JSON.stringify(errors2.slice(0, 1)));
 
-// --- 描画モードでの線選択・移動 ---
-await evaluate(`handleDrawTap((() => { const l = drawing.lines[0]; return mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2); })())`);
-check('描画モードで線タップ→選択される', await evaluate('selectedId === drawing.lines[0].id && !pending'));
+// --- 指=選択・移動、ペン=描画の役割分担 ---
 await evaluate(`(() => {
   const r = canvas.getBoundingClientRect();
   const l = drawing.lines[0];
   const s = mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2);
-  const opts = (x, y) => ({ pointerId: 30, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  const opts = { pointerId: 50, pointerType: 'touch', isPrimary: true, clientX: r.left + s.x, clientY: r.top + s.y, bubbles: true };
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts));
+})()`);
+check('指タップで線を選択できる', await evaluate('selectedId === drawing.lines[0].id && !pending'));
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const l = drawing.lines[0];
+  const s = mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2);
+  const opts = (x, y) => ({ pointerId: 51, pointerType: 'touch', isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
   canvas.dispatchEvent(new PointerEvent('pointerdown', opts(s.x, s.y)));
   canvas.dispatchEvent(new PointerEvent('pointermove', opts(s.x + 40, s.y + 20)));
   canvas.dispatchEvent(new PointerEvent('pointerup', opts(s.x + 40, s.y + 20)));
 })()`);
-check('描画モードのまま線をドラッグで移動できる',
+check('指ドラッグで選択中の線を移動できる',
   await evaluate('drawing.lines[0].x1 === 90 && drawing.lines[0].y1 === 80'),
   await evaluate('JSON.stringify([drawing.lines[0].x1, drawing.lines[0].y1])'));
-await evaluate('handleDrawTap({x:1000, y:600})');
-check('空きタップで選択解除して起点が置かれる', await evaluate('!selectedId && pending && !pending.hasEnd'));
-await evaluate("document.getElementById('btnCancel').click()");
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const opts = { pointerId: 52, pointerType: 'touch', isPrimary: true, clientX: r.left + 1000, clientY: r.top + 600, bubbles: true };
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts));
+})()`);
+check('指の空きタップは選択解除のみ（起点は置かれない）', await evaluate('!selectedId && !pending'));
+await evaluate('handleDrawTap({x:1000, y:600})'); // ペン相当のタップ
+check('ペンタップで起点が置かれる', await evaluate('pending && !pending.hasEnd'));
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const opts = { pointerId: 53, pointerType: 'touch', isPrimary: true, clientX: r.left + 500, clientY: r.top + 300, bubbles: true };
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts));
+})()`);
+check('指タップで起点を解除できる', (await evaluate('pending')) === null);
 await evaluate("document.getElementById('btnUndo').click()"); // 移動を元に戻す
 
 // --- 四角形ツール（タップ→寸法入力） ---
@@ -268,6 +285,8 @@ await evaluate(`(() => {
 })()`);
 check('縫い代線が4本追加される',
   await evaluate("drawing.lines.length === 10 && drawing.lines.slice(6).every(l => l.style === 'seam')"));
+check('縫い代線にも長さラベルが付く',
+  await evaluate("[...labelsLayer.querySelectorAll('text')].some(t => t.textContent === '320')"));
 const seamPts = await evaluate("JSON.stringify(drawing.lines.filter(l => l.style==='seam').flatMap(l => [[l.x1,l.y1],[l.x2,l.y2]]).map(p => p.join(',')).sort())");
 const expSeam = JSON.stringify(['60,160','60,160','60,380','60,380','380,160','380,160','380,380','380,380'].sort());
 check('縫い代が10mm外側にオフセットされる', seamPts === expSeam, seamPts);

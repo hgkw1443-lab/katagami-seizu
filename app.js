@@ -20,7 +20,8 @@ const ZOOM_MIN = 0.3, ZOOM_MAX = 20;
 // ===== 状態 =====
 let drawing = null;                        // { id, name, lines, updatedAt, view }
 let view = { panX: -30, panY: -30, zoom: 2 }; // panX/panY: viewBox左上(mm), zoom: px/mm
-let mode = 'draw';                         // 'move' | 'draw' | 'rect'
+// 入力の役割分担: ペン（とマウス）=描く、指=表示移動・選択
+let mode = 'draw';                         // 'draw' | 'rect'
 let currentStyle = 'solid';                // 'solid' | 'dashed'
 let selectedId = null;
 let pending = null;                        // { x1,y1, x2,y2, hasEnd }
@@ -229,7 +230,7 @@ function renderLines() {
     };
     if (l.style === 'dashed') attrs['stroke-dasharray'] = `${8 / view.zoom} ${6 / view.zoom}`;
     linesLayer.appendChild(svgEl('line', attrs));
-    if (!seam) addLabel(l, sel ? '#0a84ff' : '#c0392b'); // 縫い代線はラベルを出さない
+    addLabel(l, sel ? '#0a84ff' : seam ? '#8f8f8f' : '#c0392b');
   }
 }
 
@@ -338,8 +339,6 @@ function addLabelTo(layer, l) {
 }
 
 function updateToolbar() {
-  $('btnMove').classList.toggle('active', mode === 'move');
-  $('btnDraw').classList.toggle('active', mode === 'draw');
   $('btnRect').classList.toggle('active', mode === 'rect');
   $('btnSolid').classList.toggle('active', currentStyle === 'solid');
   $('btnDashed').classList.toggle('active', currentStyle === 'dashed');
@@ -366,19 +365,15 @@ function updateToolbar() {
   // ヒント
   let hint;
   if (mode === 'rect') {
-    hint = 'ドラッグで四角形を作成（角から対角へ）。タップで寸法入力（2本指で表示移動）';
-  } else if (mode === 'move') {
-    hint = selectedId
-      ? '線をドラッグで移動、端点ハンドルで変形。長さ・角度・線種の変更、削除ができます'
-      : 'ドラッグで表示移動、ピンチで拡大縮小。線をタップで選択';
-  } else if (!pending) {
-    hint = selectedId
-      ? '線をドラッグで移動。空きをタップで起点を置く'
-      : '空きをタップで起点、線をタップで選択（2本指で表示移動）';
-  } else if (!pending.hasEnd) {
-    hint = '終点をタップすると線が確定。または長さをmmで入力';
-  } else {
+    hint = 'ペン: ドラッグで四角形、タップで寸法入力。指: 表示移動・線の選択';
+  } else if (pending && !pending.hasEnd) {
+    hint = 'ペンで終点をタップすると線が確定（長さ入力も可）。指タップで起点を解除';
+  } else if (pending) {
     hint = '先端の○をドラッグで回転（15°スナップ・端点に吸着）。数値で微調整して［確定］';
+  } else if (selectedId) {
+    hint = '線をドラッグで移動、端点ハンドルで変形。指で空きをタップすると選択解除';
+  } else {
+    hint = 'ペンのタップで起点を置いて線を描く。指: ドラッグで表示移動、線をタップで選択';
   }
   $('hint').textContent = hint;
   $('drawingName').textContent = drawing ? drawing.name : '';
@@ -427,12 +422,14 @@ canvas.addEventListener('pointerdown', (e) => {
       if (d * view.zoom < LINE_HIT_PX) { drag = 'lineBody'; startLine = { ...l }; }
     }
   }
-  if (!drag && mode === 'rect') drag = 'rectDraw'; // 四角形モード: ドラッグで対角を指定
+  const isTouch = e.pointerType === 'touch';
+  if (!drag && mode === 'rect' && !isTouch) drag = 'rectDraw'; // 四角形モード: ペンのドラッグで対角を指定
   gesture = {
     type: 'single',
     startX: pos.x, startY: pos.y,
     moved: false,
     drag,
+    isTouch,
     startLine,
     startMm: screenToMm(pos.x, pos.y),
     startView: { ...view },
@@ -549,12 +546,14 @@ function endPointer(e) {
   // タップ
   if (e.type === 'pointercancel') return;
   const pos = eventPos(e);
-  if (mode === 'rect') {
+  if (g.isTouch) {
+    // 指タップ: 起点があれば解除、なければ線の選択/選択解除
+    if (pending) { pending = null; render(); }
+    else handleMoveTap(pos);
+  } else if (mode === 'rect') {
     handleRectTap(pos);
-  } else if (mode === 'draw') {
-    handleDrawTap(pos);
   } else {
-    handleMoveTap(pos);
+    handleDrawTap(pos);
   }
 }
 canvas.addEventListener('pointerup', endPointer);
@@ -572,11 +571,7 @@ function nearScreen(pos, mx, my, r) {
 function handleDrawTap(pos) {
   const mm = screenToMm(pos.x, pos.y);
   if (!pending) {
-    // 起点を置く前なら、既存線の本体タップは「選択」として扱う（端点付近は起点配置を優先）
-    if (!nearestEndpoint(mm)) {
-      const hit = hitLine(mm);
-      if (hit) { selectLine(hit); return; }
-    }
+    // ペンのタップは常に「点を置く」（選択は指タップの役割）
     selectedId = null;
     const p0 = snapPoint(mm);
     pending = { x1: p0.x, y1: p0.y, x2: p0.x, y2: p0.y, hasEnd: false };
@@ -621,12 +616,6 @@ function handleMoveTap(pos) {
 }
 
 // ===== ツールバー操作 =====
-$('btnMove').addEventListener('click', () => {
-  mode = 'move'; pending = null; rectPending = null; render();
-});
-$('btnDraw').addEventListener('click', () => {
-  mode = 'draw'; selectedId = null; rectPending = null; render();
-});
 $('btnSolid').addEventListener('click', () => setStyle('solid'));
 $('btnDashed').addEventListener('click', () => setStyle('dashed'));
 function setStyle(s) {
@@ -1079,11 +1068,10 @@ function exportPNG() {
   ctx.setLineDash([]);
 
   // 長さラベル
-  ctx.fillStyle = '#c0392b';
   ctx.font = `${scale * 4}px -apple-system, sans-serif`;
   ctx.textAlign = 'center';
   for (const l of drawing.lines) {
-    if (l.style === 'seam') continue;
+    ctx.fillStyle = l.style === 'seam' ? '#8f8f8f' : '#c0392b';
     const mx = (X(l.x1) + X(l.x2)) / 2, my = (Y(l.y1) + Y(l.y2)) / 2;
     let rot = Math.atan2(l.y2 - l.y1, l.x2 - l.x1);
     if (rot > Math.PI / 2 || rot <= -Math.PI / 2) rot += Math.PI;
