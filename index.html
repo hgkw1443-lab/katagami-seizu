@@ -49,6 +49,10 @@
     <button id="btnDashed" class="tool">┄┄ 点線</button>
   </div>
   <div class="group">
+    <button id="btnRect" class="tool">▭ 四角形</button>
+    <button id="btnSeam" class="tool">縫い代</button>
+  </div>
+  <div class="group">
     <label>長さ <input id="inpLen" type="number" inputmode="decimal" min="0" step="1"><span class="unit">mm</span></label>
     <label>角度 <input id="inpAng" type="number" inputmode="decimal" step="1"><span class="unit">°</span></label>
   </div>
@@ -68,6 +72,25 @@
       <button id="btnCloseList">✕</button>
     </div>
     <ul id="drawingList"></ul>
+    <div class="panel-footer">
+      <span class="note">バックアップ:</span>
+      <button id="btnBackup">書き出し</button>
+      <button id="btnRestore">読み込み</button>
+      <input id="fileRestore" type="file" accept="application/json,.json" hidden>
+    </div>
+  </div>
+</div>
+
+<div id="rectOverlay" class="hidden">
+  <div id="rectPanel">
+    <h2>四角形を作成</h2>
+    <label>幅　 <input id="inpRectW" type="number" inputmode="decimal" min="1"><span class="unit">mm</span></label>
+    <label>高さ <input id="inpRectH" type="number" inputmode="decimal" min="1"><span class="unit">mm</span></label>
+    <p class="note">先に起点をタップしてあれば、その点が左上の角になります</p>
+    <div class="row">
+      <button id="btnRectCreate" class="primary">作成</button>
+      <button id="btnRectCancel">キャンセル</button>
+    </div>
   </div>
 </div>
 

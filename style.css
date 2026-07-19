@@ -191,3 +191,50 @@ button.danger {
   cursor: default;
 }
 #drawingList button { min-height: 38px; padding: 4px 10px; font-size: 14px; }
+.panel-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid #e3e8ee;
+}
+.note { font-size: 13px; color: #888; }
+
+/* ===== 四角形パネル ===== */
+#rectOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#rectPanel {
+  background: #fff;
+  border-radius: 16px;
+  padding: 20px;
+  width: min(340px, 90vw);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+#rectPanel h2 { font-size: 18px; color: #333; }
+#rectPanel label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  color: #555;
+}
+#rectPanel input[type="number"] {
+  flex: 1;
+  min-height: 44px;
+  font-size: 18px;
+  padding: 4px 10px;
+  border: 1px solid #ccd4dd;
+  border-radius: 8px;
+  text-align: right;
+}
+#rectPanel .row { display: flex; gap: 10px; justify-content: flex-end; }

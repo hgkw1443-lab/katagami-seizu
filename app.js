@@ -77,12 +77,12 @@ function distToSegment(p, a, b) {
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
 
-// 画面距離で最寄りの既存端点を探す（吸着圏内になければnull）
+// 画面距離で最寄りの既存端点を探す（吸着圏内になければnull）。縫い代線は対象外
 function nearestEndpoint(mm, excludeLineId) {
   let best = null, bestD = SNAP_ENDPOINT_PX;
   const cur = mmToScreen(mm.x, mm.y);
   for (const l of drawing.lines) {
-    if (l.id === excludeLineId) continue;
+    if (l.id === excludeLineId || l.style === 'seam') continue;
     for (const p of [{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]) {
       const s = mmToScreen(p.x, p.y);
       const d = Math.hypot(s.x - cur.x, s.y - cur.y);
@@ -216,15 +216,16 @@ function renderLines() {
   labelsLayer.innerHTML = '';
   for (const l of drawing.lines) {
     const sel = l.id === selectedId;
+    const seam = l.style === 'seam';
     const attrs = {
       x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2,
-      stroke: sel ? '#0a84ff' : '#2b2b2b',
-      'stroke-width': (sel ? 3 : 1.8) / view.zoom,
+      stroke: sel ? '#0a84ff' : (seam ? '#8f8f8f' : '#2b2b2b'),
+      'stroke-width': (sel ? 3 : seam ? 1.2 : 1.8) / view.zoom,
       'stroke-linecap': 'round',
     };
     if (l.style === 'dashed') attrs['stroke-dasharray'] = `${8 / view.zoom} ${6 / view.zoom}`;
     linesLayer.appendChild(svgEl('line', attrs));
-    addLabel(l, sel ? '#0a84ff' : '#c0392b');
+    if (!seam) addLabel(l, sel ? '#0a84ff' : '#c0392b'); // 縫い代線はラベルを出さない
   }
 }
 
@@ -336,7 +337,9 @@ function updateToolbar() {
       ? '線をドラッグで移動、端点ハンドルで変形。長さ・角度・線種の変更、削除ができます'
       : 'ドラッグで表示移動、ピンチで拡大縮小。線をタップで選択';
   } else if (!pending) {
-    hint = 'キャンバスをタップして起点を置く（2本指で表示移動）';
+    hint = selectedId
+      ? '線をドラッグで移動。空きをタップで起点を置く'
+      : '空きをタップで起点、線をタップで選択（2本指で表示移動）';
   } else if (!pending.hasEnd) {
     hint = '終点をタップすると線が確定。または長さをmmで入力';
   } else {
@@ -522,10 +525,21 @@ function nearScreen(pos, mx, my, r) {
 }
 
 function handleDrawTap(pos) {
-  const p = snapPoint(screenToMm(pos.x, pos.y));
+  const mm = screenToMm(pos.x, pos.y);
   if (!pending) {
-    pending = { x1: p.x, y1: p.y, x2: p.x, y2: p.y, hasEnd: false };
-  } else if (!pending.hasEnd) {
+    // 起点を置く前なら、既存線の本体タップは「選択」として扱う（端点付近は起点配置を優先）
+    if (!nearestEndpoint(mm)) {
+      const hit = hitLine(mm);
+      if (hit) { selectLine(hit); return; }
+    }
+    selectedId = null;
+    const p0 = snapPoint(mm);
+    pending = { x1: p0.x, y1: p0.y, x2: p0.x, y2: p0.y, hasEnd: false };
+    render();
+    return;
+  }
+  const p = snapPoint(mm);
+  if (!pending.hasEnd) {
     // 2点目のタップ → その場で線を確定（確定ボタン不要）
     if (p.x === pending.x1 && p.y === pending.y1) return; // 同じ点は無視
     drawing.lines.push({
@@ -544,16 +558,21 @@ function handleDrawTap(pos) {
   render();
 }
 
-function handleMoveTap(pos) {
-  const mm = screenToMm(pos.x, pos.y);
+function hitLine(mm) {
   let best = null, bestD = LINE_HIT_PX / view.zoom;
   for (const l of drawing.lines) {
     const d = distToSegment(mm, { x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 });
     if (d < bestD) { bestD = d; best = l; }
   }
-  selectedId = best ? best.id : null;
-  if (best) currentStyle = best.style; // 線種トグルに選択線の状態を反映
+  return best;
+}
+function selectLine(l) {
+  selectedId = l ? l.id : null;
+  if (l && l.style !== 'seam') currentStyle = l.style; // 線種トグルに選択線の状態を反映
   render();
+}
+function handleMoveTap(pos) {
+  selectLine(hitLine(screenToMm(pos.x, pos.y)));
 }
 
 // ===== ツールバー操作 =====
@@ -733,6 +752,183 @@ function renderList() {
   }
 }
 
+// ===== 四角形ツール =====
+$('btnRect').addEventListener('click', () => {
+  $('rectOverlay').classList.remove('hidden');
+});
+$('btnRectCancel').addEventListener('click', () => $('rectOverlay').classList.add('hidden'));
+$('rectOverlay').addEventListener('click', (e) => {
+  if (e.target === $('rectOverlay')) $('rectOverlay').classList.add('hidden');
+});
+$('btnRectCreate').addEventListener('click', () => {
+  const w = parseFloat($('inpRectW').value);
+  const h = parseFloat($('inpRectH').value);
+  if (!(w > 0) || !(h > 0)) { alert('幅と高さをmmで入力してください'); return; }
+  let ox, oy;
+  if (pending) {
+    ox = pending.x1; oy = pending.y1; // 置いた起点を左上角に
+  } else {
+    const cw = canvas.clientWidth, ch = canvas.clientHeight;
+    ox = Math.round((view.panX + cw / 2 / view.zoom - w / 2) / GRID) * GRID;
+    oy = Math.round((view.panY + ch / 2 / view.zoom - h / 2) / GRID) * GRID;
+  }
+  const pts = [[ox, oy], [ox + w, oy], [ox + w, oy + h], [ox, oy + h]];
+  for (let i = 0; i < 4; i++) {
+    const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % 4];
+    drawing.lines.push({
+      id: uid(),
+      x1: round1(x1), y1: round1(y1), x2: round1(x2), y2: round1(y2),
+      style: currentStyle,
+    });
+  }
+  pending = null;
+  selectedId = null;
+  $('rectOverlay').classList.add('hidden');
+  commit();
+});
+
+// ===== 縫い代の自動生成 =====
+$('btnSeam').addEventListener('click', () => {
+  const sel = drawing.lines.find(l => l.id === selectedId);
+  if (!sel || sel.style === 'seam') {
+    alert('縫い代を付けたい外形の線を1本タップで選択してから押してください');
+    return;
+  }
+  const loop = traceLoop(sel);
+  if (!loop) {
+    alert('選択した線がつながった閉じた形になっていません。\n端点同士をぴったり合わせて（吸着させて）ください');
+    return;
+  }
+  const wStr = prompt('縫い代の幅 (mm)', '10');
+  if (wStr === null) return;
+  const d = parseFloat(wStr);
+  if (!(d > 0)) return;
+  const out = offsetPolygon(loop, d);
+  for (let i = 0; i < out.length; i++) {
+    const a = out[i], b = out[(i + 1) % out.length];
+    drawing.lines.push({
+      id: uid(),
+      x1: round1(a.x), y1: round1(a.y), x2: round1(b.x), y2: round1(b.y),
+      style: 'seam',
+    });
+  }
+  commit();
+});
+
+// 選択した線から端点同士がつながった閉じたループをたどる（縫い代線は無視）
+function traceLoop(startLine) {
+  const key = (x, y) => x + ',' + y;
+  const map = new Map();
+  for (const l of drawing.lines) {
+    if (l.style === 'seam') continue;
+    for (const k of [key(l.x1, l.y1), key(l.x2, l.y2)]) {
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(l);
+    }
+  }
+  const pts = [{ x: startLine.x1, y: startLine.y1 }];
+  const used = new Set([startLine.id]);
+  let cur = { x: startLine.x2, y: startLine.y2 };
+  for (let guard = 0; guard < 500; guard++) {
+    if (cur.x === pts[0].x && cur.y === pts[0].y) return pts.length >= 3 ? pts : null;
+    pts.push({ ...cur });
+    const conns = (map.get(key(cur.x, cur.y)) || []).filter(l => !used.has(l.id));
+    if (conns.length !== 1) return null; // 行き止まり・分岐は閉形と判断できない
+    const l = conns[0];
+    used.add(l.id);
+    cur = (l.x1 === cur.x && l.y1 === cur.y) ? { x: l.x2, y: l.y2 } : { x: l.x1, y: l.y1 };
+  }
+  return null;
+}
+
+// 多角形を外側へdだけオフセットした頂点列を返す（角はマイター接合）
+function offsetPolygon(pts, d) {
+  const n = pts.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    area += a.x * b.y - b.x * a.y;
+  }
+  const s = area > 0 ? 1 : -1;
+  const edges = [];
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const nx = s * (b.y - a.y) / len, ny = s * -(b.x - a.x) / len;
+    edges.push({ ax: a.x + nx * d, ay: a.y + ny * d, bx: b.x + nx * d, by: b.y + ny * d });
+  }
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const e1 = edges[(i + n - 1) % n], e2 = edges[i];
+    out.push(intersectLines(e1, e2) || { x: e2.ax, y: e2.ay });
+  }
+  return out;
+}
+function intersectLines(e1, e2) {
+  const d1x = e1.bx - e1.ax, d1y = e1.by - e1.ay;
+  const d2x = e2.bx - e2.ax, d2y = e2.by - e2.ay;
+  const den = d1x * d2y - d1y * d2x;
+  if (Math.abs(den) < 1e-9) return null;
+  const t = ((e2.ax - e1.ax) * d2y - (e2.ay - e1.ay) * d2x) / den;
+  return { x: e1.ax + t * d1x, y: e1.ay + t * d1y };
+}
+
+// ===== バックアップ（書き出し／読み込み） =====
+function buildBackupData() {
+  saveNow();
+  const drawings = loadIndex()
+    .map(e => { try { return JSON.parse(localStorage.getItem('pattern:' + e.id)); } catch { return null; } })
+    .filter(Boolean);
+  return { app: 'katagami-seizu', version: 1, drawings };
+}
+$('btnBackup').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify(buildBackupData())], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  const now = new Date();
+  const pad = (v) => String(v).padStart(2, '0');
+  a.download = `katagami-backup-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
+function applyBackupData(data) {
+  if (!data || data.app !== 'katagami-seizu' || !Array.isArray(data.drawings)) return -1;
+  let count = 0;
+  for (const d of data.drawings) {
+    if (!d || !d.id || !Array.isArray(d.lines)) continue;
+    localStorage.setItem('pattern:' + d.id, JSON.stringify(d));
+    const idx = loadIndex().filter(e => e.id !== d.id);
+    idx.unshift({ id: d.id, name: d.name || '無題', updatedAt: d.updatedAt || Date.now() });
+    saveIndex(idx);
+    count++;
+  }
+  if (count > 0 && drawing && data.drawings.some(d => d && d.id === drawing.id)) {
+    openDrawing(drawing.id); // 開いている製図が上書きされたら読み直す
+  }
+  return count;
+}
+$('btnRestore').addEventListener('click', () => $('fileRestore').click());
+$('fileRestore').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data = null;
+    try { data = JSON.parse(reader.result); } catch { }
+    const count = applyBackupData(data);
+    if (count < 0) alert('バックアップファイルの形式が正しくありません');
+    else {
+      alert(`${count}件の製図を読み込みました`);
+      renderList();
+      render();
+    }
+  };
+  reader.readAsText(f);
+});
+
 // ===== PNG書き出し =====
 $('btnExport').addEventListener('click', exportPNG);
 function exportPNG() {
@@ -772,8 +968,9 @@ function exportPNG() {
 
   // 線
   for (const l of drawing.lines) {
-    ctx.strokeStyle = '#222';
-    ctx.lineWidth = Math.max(1.5, scale * 0.5);
+    const seam = l.style === 'seam';
+    ctx.strokeStyle = seam ? '#8f8f8f' : '#222';
+    ctx.lineWidth = seam ? Math.max(1, scale * 0.3) : Math.max(1.5, scale * 0.5);
     ctx.lineCap = 'round';
     ctx.setLineDash(l.style === 'dashed' ? [scale * 4, scale * 3] : []);
     ctx.beginPath();
@@ -788,6 +985,7 @@ function exportPNG() {
   ctx.font = `${scale * 4}px -apple-system, sans-serif`;
   ctx.textAlign = 'center';
   for (const l of drawing.lines) {
+    if (l.style === 'seam') continue;
     const mx = (X(l.x1) + X(l.x2)) / 2, my = (Y(l.y1) + Y(l.y2)) / 2;
     let rot = Math.atan2(l.y2 - l.y1, l.x2 - l.x1);
     if (rot > Math.PI / 2 || rot <= -Math.PI / 2) rot += Math.PI;
