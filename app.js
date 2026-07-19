@@ -373,7 +373,7 @@ function updateToolbar() {
   } else if (selectedId) {
     hint = '線をドラッグで移動、端点ハンドルで変形。指で空きをタップすると選択解除';
   } else {
-    hint = 'ペンのタップで起点を置いて線を描く。指: ドラッグで表示移動、線をタップで選択';
+    hint = 'ペン: ドラッグで線を引く／タップで起点を置く。指: 表示移動・線をタップで選択';
   }
   $('hint').textContent = hint;
   $('drawingName').textContent = drawing ? drawing.name : '';
@@ -423,7 +423,8 @@ canvas.addEventListener('pointerdown', (e) => {
     }
   }
   const isTouch = e.pointerType === 'touch';
-  if (!drag && mode === 'rect' && !isTouch) drag = 'rectDraw'; // 四角形モード: ペンのドラッグで対角を指定
+  // ペンのドラッグで描く: 四角形モードは対角指定、通常モードは始点→終点の線
+  if (!drag && !isTouch) drag = (mode === 'rect') ? 'rectDraw' : 'lineDraw';
   gesture = {
     type: 'single',
     startX: pos.x, startY: pos.y,
@@ -507,6 +508,12 @@ canvas.addEventListener('pointermove', (e) => {
     const b = snapPoint(screenToMm(pos.x, pos.y));
     rectPending = { x1: a.x, y1: a.y, x2: b.x, y2: b.y };
     render();
+  } else if (gesture.drag === 'lineDraw') {
+    const a = snapPoint(gesture.startMm);
+    const b = snapPoint(screenToMm(pos.x, pos.y));
+    selectedId = null;
+    pending = { x1: a.x, y1: a.y, x2: b.x, y2: b.y, hasEnd: true };
+    render();
   } else if (gesture.drag === 'sel1' || gesture.drag === 'sel2') {
     const l = drawing.lines.find(x => x.id === selectedId);
     if (!l) return;
@@ -537,6 +544,7 @@ function endPointer(e) {
   if (g.moved) {
     if (g.drag === 'sel1' || g.drag === 'sel2' || g.drag === 'lineBody') commit(); // 移動を確定
     else if (g.drag === 'rectDraw') finishRectDrag();
+    else if (g.drag === 'lineDraw') finishLineDrag();
     else if (g.drag === 'pendingEnd') render();
     else scheduleSave(); // パン位置を保存
     return;
@@ -596,6 +604,20 @@ function handleDrawTap(pos) {
     pending = { x1: p.x, y1: p.y, x2: p.x, y2: p.y, hasEnd: false };
   }
   render();
+}
+
+// ペンのドラッグ終了 → 始点から離した点までの線を作成
+function finishLineDrag() {
+  const p = pending;
+  pending = null;
+  if (!p || lineLength(p) < 1) { render(); return; } // 短すぎるものは誤操作とみなす
+  drawing.lines.push({
+    id: uid(),
+    x1: round1(p.x1), y1: round1(p.y1),
+    x2: round1(p.x2), y2: round1(p.y2),
+    style: currentStyle,
+  });
+  commit();
 }
 
 function hitLine(mm) {

@@ -328,9 +328,27 @@ await evaluate(`(() => {
 })()`);
 check('実イベント: タップで起点が置かれる', await evaluate('pending && !pending.hasEnd'));
 
+// ペンのドラッグで始点→終点の線を引く（直前の起点は破棄される）
+const nBefore = await evaluate('drawing.lines.length');
 await evaluate(`(() => {
   const r = canvas.getBoundingClientRect();
-  const opts = (x, y) => ({ pointerId: 8, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  const p1 = mmToScreen(500, 300), p2 = mmToScreen(600, 350);
+  const opts = (x, y) => ({ pointerId: 60, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(p1.x, p1.y)));
+  canvas.dispatchEvent(new PointerEvent('pointermove', opts(p2.x, p2.y)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(p2.x, p2.y)));
+})()`);
+const dragLine = await evaluate("JSON.stringify((() => { const l = drawing.lines[drawing.lines.length-1]; return [l.x1,l.y1,l.x2,l.y2,l.style]; })())");
+check('実イベント: ペンのドラッグで線が引ける',
+  (await evaluate('drawing.lines.length')) === nBefore + 1 &&
+  dragLine === JSON.stringify([500, 300, 600, 350, 'solid']) &&
+  (await evaluate('pending')) === null,
+  dragLine);
+await evaluate("document.getElementById('btnUndo').click()"); // ドラッグ分を戻す
+
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  const opts = (x, y) => ({ pointerId: 8, pointerType: 'touch', isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
   window.__before = { ...view };
   canvas.dispatchEvent(new PointerEvent('pointerdown', opts(600, 300)));
   canvas.dispatchEvent(new PointerEvent('pointermove', opts(650, 340)));
