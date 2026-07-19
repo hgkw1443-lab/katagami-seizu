@@ -15,6 +15,8 @@ const SNAP_ENDPOINT_PX = 14;  // 既存端点へのスナップ半径 (px)
 const SNAP_GRID_PX = 10;      // グリッド交点へのスナップ半径 (px)
 const LINE_HIT_PX = 14;       // 線の選択判定距離 (px)
 const HANDLE_HIT_PX = 26;     // ハンドルのつかみ判定 (px)
+const DOUBLE_TAP_MS = 400;    // ダブルタップ判定の間隔
+const DOUBLE_TAP_PX = 40;     // ダブルタップ判定の位置ずれ許容 (px)
 const ZOOM_MIN = 0.3, ZOOM_MAX = 20;
 
 // ===== 状態 =====
@@ -23,7 +25,9 @@ let view = { panX: -30, panY: -30, zoom: 2 }; // panX/panY: viewBox左上(mm), z
 // 入力の役割分担: ペン（とマウス）=描く、指=表示移動・選択
 let mode = 'draw';                         // 'draw' | 'rect'
 let currentStyle = 'solid';                // 'solid' | 'dashed'
-let selectedId = null;
+let selectedIds = [];                      // 選択中の線ID（複数可）
+let marquee = null;                        // 範囲選択ドラッグ中の矩形 { x1,y1,x2,y2 } (mm)
+let lastTouchTap = null;                   // ダブルタップ判定用 { t, x, y }
 let pending = null;                        // { x1,y1, x2,y2, hasEnd }
 let rectPending = null;                    // 四角形ドラッグ中のプレビュー { x1,y1,x2,y2 }
 let rectAnchor = null;                     // 寸法入力パネル用の左上角
@@ -83,11 +87,13 @@ function distToSegment(p, a, b) {
 }
 
 // 画面距離で最寄りの既存端点を探す（吸着圏内になければnull）。縫い代線は対象外
-function nearestEndpoint(mm, excludeLineId) {
+// exclude: 除外する線ID（文字列1つ or Set）
+function nearestEndpoint(mm, exclude) {
+  const excl = exclude instanceof Set ? exclude : (exclude ? new Set([exclude]) : null);
   let best = null, bestD = SNAP_ENDPOINT_PX;
   const cur = mmToScreen(mm.x, mm.y);
   for (const l of drawing.lines) {
-    if (l.id === excludeLineId || l.style === 'seam') continue;
+    if ((excl && excl.has(l.id)) || l.style === 'seam') continue;
     for (const p of [{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]) {
       const s = mmToScreen(p.x, p.y);
       const d = Math.hypot(s.x - cur.x, s.y - cur.y);
@@ -149,7 +155,7 @@ function openDrawing(id) {
   if (!d) return false;
   drawing = d;
   view = d.view ? { ...d.view } : { panX: -30, panY: -30, zoom: 2 };
-  selectedId = null;
+  selectedIds = [];
   pending = null;
   history = [JSON.stringify(drawing.lines)];
   historyIndex = 0;
@@ -170,7 +176,7 @@ function undo() {
   if (historyIndex <= 0) return;
   historyIndex--;
   drawing.lines = JSON.parse(history[historyIndex]);
-  if (selectedId && !drawing.lines.some(l => l.id === selectedId)) selectedId = null;
+  selectedIds = selectedIds.filter(id => drawing.lines.some(l => l.id === id));
   pending = null;
   scheduleSave();
   render();
@@ -179,7 +185,7 @@ function redo() {
   if (historyIndex >= history.length - 1) return;
   historyIndex++;
   drawing.lines = JSON.parse(history[historyIndex]);
-  if (selectedId && !drawing.lines.some(l => l.id === selectedId)) selectedId = null;
+  selectedIds = selectedIds.filter(id => drawing.lines.some(l => l.id === id));
   pending = null;
   scheduleSave();
   render();
@@ -220,7 +226,7 @@ function renderLines() {
   linesLayer.innerHTML = '';
   labelsLayer.innerHTML = '';
   for (const l of drawing.lines) {
-    const sel = l.id === selectedId;
+    const sel = selectedIds.includes(l.id);
     const seam = l.style === 'seam';
     const attrs = {
       x1: l.x1, y1: l.y1, x2: l.x2, y2: l.y2,
@@ -255,17 +261,25 @@ function renderOverlay() {
   overlayLayer.innerHTML = '';
   const z = view.zoom;
 
-  // 選択中の線の端点ハンドル
-  if (selectedId) {
-    const l = drawing.lines.find(x => x.id === selectedId);
-    if (l) {
-      for (const p of [{ x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }]) {
-        overlayLayer.appendChild(svgEl('circle', {
-          cx: p.x, cy: p.y, r: 8 / z,
-          fill: '#fff', stroke: '#0a84ff', 'stroke-width': 2.5 / z,
-        }));
-      }
+  // 選択中の線の端点ハンドル（1本だけ選択しているとき）
+  const selOne = singleSel();
+  if (selOne) {
+    for (const p of [{ x: selOne.x1, y: selOne.y1 }, { x: selOne.x2, y: selOne.y2 }]) {
+      overlayLayer.appendChild(svgEl('circle', {
+        cx: p.x, cy: p.y, r: 8 / z,
+        fill: '#fff', stroke: '#0a84ff', 'stroke-width': 2.5 / z,
+      }));
     }
+  }
+
+  // 範囲選択の矩形
+  if (marquee) {
+    overlayLayer.appendChild(svgEl('rect', {
+      x: marquee.x1, y: marquee.y1,
+      width: marquee.x2 - marquee.x1, height: marquee.y2 - marquee.y1,
+      fill: 'rgba(10,132,255,0.08)', stroke: '#0a84ff',
+      'stroke-width': 1.5 / z, 'stroke-dasharray': `${6 / z} ${4 / z}`,
+    }));
   }
 
   // 作成中の線（プレビュー）
@@ -348,12 +362,11 @@ function updateToolbar() {
   const hasPendingLine = pending && pending.hasEnd;
   $('btnConfirm').classList.toggle('hidden', !hasPendingLine);
   $('btnCancel').classList.toggle('hidden', !pending);
-  $('btnDelete').classList.toggle('hidden', !selectedId);
+  $('btnDelete').classList.toggle('hidden', selectedIds.length === 0);
 
-  // 長さ・角度欄（入力中は上書きしない）
-  let target = null;
-  if (selectedId) target = drawing.lines.find(l => l.id === selectedId);
-  else if (hasPendingLine) target = pending;
+  // 長さ・角度欄（入力中は上書きしない。複数選択中は表示しない）
+  let target = singleSel();
+  if (!target && hasPendingLine) target = pending;
   if (target) {
     if (document.activeElement !== inpLen) inpLen.value = round1(lineLength(target));
     if (document.activeElement !== inpAng) inpAng.value = round1(lineAngle(target));
@@ -370,10 +383,12 @@ function updateToolbar() {
     hint = 'ペンで終点をタップすると線が確定（長さ入力も可）。指タップで起点を解除';
   } else if (pending) {
     hint = '先端の○をドラッグで回転（15°スナップ・端点に吸着）。数値で微調整して［確定］';
-  } else if (selectedId) {
+  } else if (selectedIds.length > 1) {
+    hint = `${selectedIds.length}本を選択中。指ドラッグでまとめて移動、［削除］でまとめて削除`;
+  } else if (selectedIds.length === 1) {
     hint = '線をドラッグで移動、端点ハンドルで変形。指で空きをタップすると選択解除';
   } else {
-    hint = 'ペン: ドラッグで線を引く／タップで起点を置く。指: 表示移動・線をタップで選択';
+    hint = 'ペン: ドラッグで線／タップで起点。指: 表示移動・タップで選択・空きをダブルタップ→ドラッグで範囲選択';
   }
   $('hint').textContent = hint;
   $('drawingName').textContent = drawing ? drawing.name : '';
@@ -394,6 +409,7 @@ canvas.addEventListener('pointerdown', (e) => {
 
   if (pointers.size === 2) {
     // ピンチ開始（進行中のタップ/ドラッグは破棄）
+    marquee = null;
     const [p1, p2] = [...pointers.values()];
     const rect = canvas.getBoundingClientRect();
     const mid = { x: (p1.x + p2.x) / 2 - rect.left, y: (p1.y + p2.y) / 2 - rect.top };
@@ -408,21 +424,31 @@ canvas.addEventListener('pointerdown', (e) => {
   if (pointers.size > 2) return;
 
   // 1本指: つかむ対象を判定
-  let drag = null, startLine = null;
-  if (pending && pending.hasEnd && nearScreen(pos, pending.x2, pending.y2, HANDLE_HIT_PX)) {
+  const isTouch = e.pointerType === 'touch';
+  let drag = null, startLines = null;
+  if (isTouch && lastTouchTap &&
+      performance.now() - lastTouchTap.t < DOUBLE_TAP_MS &&
+      Math.hypot(pos.x - lastTouchTap.x, pos.y - lastTouchTap.y) < DOUBLE_TAP_PX) {
+    // 指のダブルタップ→ドラッグ: 範囲選択
+    drag = 'marquee';
+    lastTouchTap = null;
+  } else if (pending && pending.hasEnd && nearScreen(pos, pending.x2, pending.y2, HANDLE_HIT_PX)) {
     drag = 'pendingEnd';
-  } else if (selectedId) {
-    const l = drawing.lines.find(x => x.id === selectedId);
-    if (l && nearScreen(pos, l.x1, l.y1, HANDLE_HIT_PX)) drag = 'sel1';
-    else if (l && nearScreen(pos, l.x2, l.y2, HANDLE_HIT_PX)) drag = 'sel2';
-    else if (l) {
-      // 選択中の線の本体をつかんだら、線ごと移動
+  } else if (selectedIds.length) {
+    const one = singleSel();
+    if (one && nearScreen(pos, one.x1, one.y1, HANDLE_HIT_PX)) drag = 'sel1';
+    else if (one && nearScreen(pos, one.x2, one.y2, HANDLE_HIT_PX)) drag = 'sel2';
+    else {
+      // 選択中の線の本体をつかんだら、選択している線をまとめて移動
       const mm = screenToMm(pos.x, pos.y);
-      const d = distToSegment(mm, { x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 });
-      if (d * view.zoom < LINE_HIT_PX) { drag = 'lineBody'; startLine = { ...l }; }
+      const hit = drawing.lines.some(l => selectedIds.includes(l.id) &&
+        distToSegment(mm, { x: l.x1, y: l.y1 }, { x: l.x2, y: l.y2 }) * view.zoom < LINE_HIT_PX);
+      if (hit) {
+        drag = 'lineBody';
+        startLines = selectedIds.map(id => ({ ...drawing.lines.find(x => x.id === id) }));
+      }
     }
   }
-  const isTouch = e.pointerType === 'touch';
   // ペンのドラッグで描く: 四角形モードは対角指定、通常モードは始点→終点の線
   if (!drag && !isTouch) drag = (mode === 'rect') ? 'rectDraw' : 'lineDraw';
   gesture = {
@@ -431,7 +457,7 @@ canvas.addEventListener('pointerdown', (e) => {
     moved: false,
     drag,
     isTouch,
-    startLine,
+    startLines,
     startMm: screenToMm(pos.x, pos.y),
     startView: { ...view },
   };
@@ -481,27 +507,43 @@ canvas.addEventListener('pointermove', (e) => {
     pending.x2 = p.x; pending.y2 = p.y;
     render();
   } else if (gesture.drag === 'lineBody') {
-    // 選択中の線をまるごと移動（1mm刻み、端点同士は吸着）
+    // 選択中の線をまるごと移動（1mm刻み、端点は選択外の線の端点に吸着）
     const cur = screenToMm(pos.x, pos.y);
     const rawDx = cur.x - gesture.startMm.x;
     const rawDy = cur.y - gesture.startMm.y;
-    const l0 = gesture.startLine;
-    const l = drawing.lines.find(x => x.id === selectedId);
-    if (!l) return;
+    const excl = new Set(selectedIds);
     let dx = Math.round(rawDx), dy = Math.round(rawDy);
     let best = null, bestD = SNAP_ENDPOINT_PX;
-    for (const [ex, ey] of [[l0.x1, l0.y1], [l0.x2, l0.y2]]) {
-      const target = nearestEndpoint({ x: ex + rawDx, y: ey + rawDy }, l.id);
-      if (target) {
-        const s = mmToScreen(ex + rawDx, ey + rawDy);
-        const t = mmToScreen(target.x, target.y);
-        const d = Math.hypot(s.x - t.x, s.y - t.y);
-        if (d < bestD) { bestD = d; best = { dx: target.x - ex, dy: target.y - ey }; }
+    for (const l0 of gesture.startLines) {
+      for (const [ex, ey] of [[l0.x1, l0.y1], [l0.x2, l0.y2]]) {
+        const target = nearestEndpoint({ x: ex + rawDx, y: ey + rawDy }, excl);
+        if (target) {
+          const s = mmToScreen(ex + rawDx, ey + rawDy);
+          const t = mmToScreen(target.x, target.y);
+          const d = Math.hypot(s.x - t.x, s.y - t.y);
+          if (d < bestD) { bestD = d; best = { dx: target.x - ex, dy: target.y - ey }; }
+        }
       }
     }
     if (best) { dx = best.dx; dy = best.dy; }
-    l.x1 = round1(l0.x1 + dx); l.y1 = round1(l0.y1 + dy);
-    l.x2 = round1(l0.x2 + dx); l.y2 = round1(l0.y2 + dy);
+    for (const l0 of gesture.startLines) {
+      const l = drawing.lines.find(x => x.id === l0.id);
+      if (!l) continue;
+      l.x1 = round1(l0.x1 + dx); l.y1 = round1(l0.y1 + dy);
+      l.x2 = round1(l0.x2 + dx); l.y2 = round1(l0.y2 + dy);
+    }
+    render();
+  } else if (gesture.drag === 'marquee') {
+    // 範囲選択: 矩形に完全に入った線を選択（プレビューしながら更新）
+    const a = gesture.startMm, b = screenToMm(pos.x, pos.y);
+    marquee = {
+      x1: Math.min(a.x, b.x), y1: Math.min(a.y, b.y),
+      x2: Math.max(a.x, b.x), y2: Math.max(a.y, b.y),
+    };
+    const inRect = (x, y) => x >= marquee.x1 && x <= marquee.x2 && y >= marquee.y1 && y <= marquee.y2;
+    selectedIds = drawing.lines
+      .filter(l => inRect(l.x1, l.y1) && inRect(l.x2, l.y2))
+      .map(l => l.id);
     render();
   } else if (gesture.drag === 'rectDraw') {
     const a = snapPoint(gesture.startMm);
@@ -511,11 +553,11 @@ canvas.addEventListener('pointermove', (e) => {
   } else if (gesture.drag === 'lineDraw') {
     const a = snapPoint(gesture.startMm);
     const b = snapPoint(screenToMm(pos.x, pos.y));
-    selectedId = null;
+    selectedIds = [];
     pending = { x1: a.x, y1: a.y, x2: b.x, y2: b.y, hasEnd: true };
     render();
   } else if (gesture.drag === 'sel1' || gesture.drag === 'sel2') {
-    const l = drawing.lines.find(x => x.id === selectedId);
+    const l = singleSel();
     if (!l) return;
     const p = snapPoint(screenToMm(pos.x, pos.y), l.id);
     if (gesture.drag === 'sel1') { l.x1 = p.x; l.y1 = p.y; }
@@ -545,6 +587,7 @@ function endPointer(e) {
     if (g.drag === 'sel1' || g.drag === 'sel2' || g.drag === 'lineBody') commit(); // 移動を確定
     else if (g.drag === 'rectDraw') finishRectDrag();
     else if (g.drag === 'lineDraw') finishLineDrag();
+    else if (g.drag === 'marquee') { marquee = null; render(); } // 選択は確定済み
     else if (g.drag === 'pendingEnd') render();
     else scheduleSave(); // パン位置を保存
     return;
@@ -556,8 +599,17 @@ function endPointer(e) {
   const pos = eventPos(e);
   if (g.isTouch) {
     // 指タップ: 起点があれば解除、なければ線の選択/選択解除
-    if (pending) { pending = null; render(); }
-    else handleMoveTap(pos);
+    if (pending) {
+      pending = null;
+      lastTouchTap = null;
+      render();
+    } else {
+      const hit = hitLine(screenToMm(pos.x, pos.y));
+      selectLine(hit);
+      // 空振りのタップだけをダブルタップ（範囲選択）の1回目として数える
+      // （線をタップ選択→すぐドラッグで移動、が誤判定されないように）
+      lastTouchTap = hit ? null : { t: performance.now(), x: pos.x, y: pos.y };
+    }
   } else if (mode === 'rect') {
     handleRectTap(pos);
   } else {
@@ -580,7 +632,7 @@ function handleDrawTap(pos) {
   const mm = screenToMm(pos.x, pos.y);
   if (!pending) {
     // ペンのタップは常に「点を置く」（選択は指タップの役割）
-    selectedId = null;
+    selectedIds = [];
     const p0 = snapPoint(mm);
     pending = { x1: p0.x, y1: p0.y, x2: p0.x, y2: p0.y, hasEnd: false };
     render();
@@ -629,9 +681,15 @@ function hitLine(mm) {
   return best;
 }
 function selectLine(l) {
-  selectedId = l ? l.id : null;
+  selectedIds = l ? [l.id] : [];
   if (l && l.style !== 'seam') currentStyle = l.style; // 線種トグルに選択線の状態を反映
   render();
+}
+// 1本だけ選択しているときその線を返す（0本・複数ならnull）
+function singleSel() {
+  return selectedIds.length === 1
+    ? (drawing.lines.find(l => l.id === selectedIds[0]) || null)
+    : null;
 }
 function handleMoveTap(pos) {
   selectLine(hitLine(screenToMm(pos.x, pos.y)));
@@ -642,10 +700,12 @@ $('btnSolid').addEventListener('click', () => setStyle('solid'));
 $('btnDashed').addEventListener('click', () => setStyle('dashed'));
 function setStyle(s) {
   currentStyle = s;
-  if (selectedId) {
-    const l = drawing.lines.find(x => x.id === selectedId);
-    if (l && l.style !== s) { l.style = s; commit(); return; }
+  let changed = false;
+  for (const id of selectedIds) {
+    const l = drawing.lines.find(x => x.id === id);
+    if (l && l.style !== s) { l.style = s; changed = true; }
   }
+  if (changed) { commit(); return; }
   render();
 }
 
@@ -662,9 +722,9 @@ $('btnConfirm').addEventListener('click', () => {
 });
 $('btnCancel').addEventListener('click', () => { pending = null; render(); });
 $('btnDelete').addEventListener('click', () => {
-  if (!selectedId) return;
-  drawing.lines = drawing.lines.filter(l => l.id !== selectedId);
-  selectedId = null;
+  if (!selectedIds.length) return;
+  drawing.lines = drawing.lines.filter(l => !selectedIds.includes(l.id));
+  selectedIds = [];
   commit();
 });
 $('btnUndo').addEventListener('click', undo);
@@ -677,9 +737,9 @@ function applyInputs(changed) {
   const len = parseFloat(inpLen.value);
   const ang = parseFloat(inpAng.value);
 
-  if (selectedId) {
-    const l = drawing.lines.find(x => x.id === selectedId);
-    if (!l) return;
+  if (selectedIds.length) {
+    const l = singleSel();
+    if (!l) return; // 複数選択中は数値では編集しない
     const newLen = (!isNaN(len) && len > 0) ? len : lineLength(l);
     const newAng = !isNaN(ang) ? ang : lineAngle(l);
     const p = endFromLenAngle(l.x1, l.y1, newLen, newAng);
@@ -812,7 +872,7 @@ function renderList() {
 $('btnRect').addEventListener('click', () => {
   mode = (mode === 'rect') ? 'draw' : 'rect';
   pending = null;
-  selectedId = null;
+  selectedIds = [];
   rectPending = null;
   render();
 });
@@ -870,7 +930,7 @@ $('btnRectCreate').addEventListener('click', () => {
   }
   pushRectLines(ox, oy, w, h);
   pending = null;
-  selectedId = null;
+  selectedIds = [];
   rectAnchor = null;
   $('rectOverlay').classList.add('hidden');
   commit();
@@ -878,7 +938,7 @@ $('btnRectCreate').addEventListener('click', () => {
 
 // ===== 縫い代／内側線の自動生成 =====
 $('btnSeam').addEventListener('click', () => {
-  const sel = drawing.lines.find(l => l.id === selectedId);
+  const sel = singleSel();
   if (!sel || sel.style === 'seam') {
     alert('線を1本タップで選択してから押してください');
     return;

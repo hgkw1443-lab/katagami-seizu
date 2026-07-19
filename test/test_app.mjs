@@ -109,7 +109,7 @@ await evaluate(`(() => {
   const s = mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2);
   handleMoveTap(s);
 })()`);
-check('線をタップで選択できる', (await evaluate('selectedId')) === (await evaluate('drawing.lines[0].id')));
+check('線をタップで選択できる', await evaluate('selectedIds.length === 1 && selectedIds[0] === drawing.lines[0].id'));
 check('削除ボタンが表示される', await evaluate("!document.getElementById('btnDelete').classList.contains('hidden')"));
 // 長さを変更
 await evaluate("(() => { const i=document.getElementById('inpLen'); i.value='300'; i.dispatchEvent(new Event('change')); })()");
@@ -209,7 +209,7 @@ await evaluate(`(() => {
   canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
   canvas.dispatchEvent(new PointerEvent('pointerup', opts));
 })()`);
-check('指タップで線を選択できる', await evaluate('selectedId === drawing.lines[0].id && !pending'));
+check('指タップで線を選択できる', await evaluate('selectedIds[0] === drawing.lines[0].id && !pending'));
 await evaluate(`(() => {
   const r = canvas.getBoundingClientRect();
   const l = drawing.lines[0];
@@ -228,7 +228,7 @@ await evaluate(`(() => {
   canvas.dispatchEvent(new PointerEvent('pointerdown', opts));
   canvas.dispatchEvent(new PointerEvent('pointerup', opts));
 })()`);
-check('指の空きタップは選択解除のみ（起点は置かれない）', await evaluate('!selectedId && !pending'));
+check('指の空きタップは選択解除のみ（起点は置かれない）', await evaluate('selectedIds.length === 0 && !pending'));
 await evaluate('handleDrawTap({x:1000, y:600})'); // ペン相当のタップ
 check('ペンタップで起点が置かれる', await evaluate('pending && !pending.hasEnd'));
 await evaluate(`(() => {
@@ -239,6 +239,56 @@ await evaluate(`(() => {
 })()`);
 check('指タップで起点を解除できる', (await evaluate('pending')) === null);
 await evaluate("document.getElementById('btnUndo').click()"); // 移動を元に戻す
+
+// --- 指のダブルタップ→ドラッグで範囲選択 ---
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  let x0=Infinity, y0=Infinity, x1=-Infinity, y1=-Infinity;
+  for (const l of drawing.lines) {
+    x0 = Math.min(x0, l.x1, l.x2); y0 = Math.min(y0, l.y1, l.y2);
+    x1 = Math.max(x1, l.x1, l.x2); y1 = Math.max(y1, l.y1, l.y2);
+  }
+  const a = mmToScreen(x0 - 10, y0 - 10), b = mmToScreen(x1 + 10, y1 + 10);
+  const opts = (id, x, y) => ({ pointerId: id, pointerType: 'touch', isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(70, a.x, a.y)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(70, a.x, a.y)));
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(71, a.x, a.y)));
+  canvas.dispatchEvent(new PointerEvent('pointermove', opts(71, b.x, b.y)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(71, b.x, b.y)));
+})()`);
+check('指ダブルタップ→ドラッグで全線を範囲選択',
+  (await evaluate('selectedIds.length')) === (await evaluate('drawing.lines.length')) &&
+  (await evaluate('marquee')) === null,
+  await evaluate("JSON.stringify([selectedIds.length, drawing.lines.length])"));
+
+// 選択した複数の線をまとめて移動（+30, +20 mm @zoom2）
+await evaluate(`(() => {
+  const r = canvas.getBoundingClientRect();
+  window.__snap = JSON.stringify(drawing.lines.map(l => [l.x1, l.y1, l.x2, l.y2]));
+  const l = drawing.lines[0];
+  const s = mmToScreen((l.x1+l.x2)/2, (l.y1+l.y2)/2);
+  const opts = (x, y) => ({ pointerId: 72, pointerType: 'touch', isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
+  canvas.dispatchEvent(new PointerEvent('pointerdown', opts(s.x, s.y)));
+  canvas.dispatchEvent(new PointerEvent('pointermove', opts(s.x + 60, s.y + 40)));
+  canvas.dispatchEvent(new PointerEvent('pointerup', opts(s.x + 60, s.y + 40)));
+})()`);
+check('複数選択をまとめて移動できる', await evaluate(`(() => {
+  const before = JSON.parse(__snap);
+  return drawing.lines.every((l, i) =>
+    l.x1 === before[i][0] + 30 && l.y1 === before[i][1] + 20 &&
+    l.x2 === before[i][2] + 30 && l.y2 === before[i][3] + 20);
+})()`));
+await evaluate("document.getElementById('btnUndo').click()");
+check('まとめて移動もundoで戻る', await evaluate(`(() => {
+  const before = JSON.parse(__snap);
+  return drawing.lines.every((l, i) => l.x1 === before[i][0] && l.y1 === before[i][1]);
+})()`));
+
+// まとめて削除 → undoで復活
+await evaluate("document.getElementById('btnDelete').click()");
+check('複数選択をまとめて削除できる', (await evaluate('drawing.lines.length')) === 0);
+await evaluate("document.getElementById('btnUndo').click()");
+check('まとめて削除もundoで戻る', (await evaluate('drawing.lines.length')) === 2);
 
 // --- 四角形ツール（タップ→寸法入力） ---
 await evaluate("document.getElementById('btnSolid').click()");
@@ -275,7 +325,7 @@ check('（後始末）undoで6本に戻る', (await evaluate('drawing.lines.leng
 
 // --- 縫い代の自動生成（外側） ---
 await evaluate('handleMoveTap(mmToScreen(220, 170))'); // 四角形の上辺を選択
-check('四角形の辺を選択できる', await evaluate('!!selectedId'));
+check('四角形の辺を選択できる', await evaluate('selectedIds.length === 1'));
 await evaluate("document.getElementById('btnSeam').click()");
 check('縫い代パネルが開く', await evaluate("!document.getElementById('seamOverlay').classList.contains('hidden')"));
 await evaluate(`(() => {
@@ -319,7 +369,7 @@ check('バックアップから復元できる',
   restoredCount >= 1 && (await evaluate("JSON.parse(localStorage.getItem('pattern:' + drawing.id)).lines.length")) === 14);
 
 // --- 実ポインタイベント経路（タップ・パン・ピンチ） ---
-await evaluate("pending = null; selectedId = null; mode = 'draw'; render()");
+await evaluate("pending = null; selectedIds = []; mode = 'draw'; render()");
 await evaluate(`(() => {
   const r = canvas.getBoundingClientRect();
   const opts = (x, y) => ({ pointerId: 7, isPrimary: true, clientX: r.left + x, clientY: r.top + y, bubbles: true });
