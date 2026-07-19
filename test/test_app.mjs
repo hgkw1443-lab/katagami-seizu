@@ -4,8 +4,19 @@ const APP_URL = process.env.APP_URL || 'http://127.0.0.1:8123/';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// 既存タブは流用しない（ダウンロード操作が残す小型ポップアップに接続すると
+// レイアウト高さ0でrender()が動かず誤検出するため、毎回正しいサイズの新規ウィンドウを作る）
+const ver = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json();
+const bws = new WebSocket(ver.webSocketDebuggerUrl);
+await new Promise((res, rej) => { bws.onopen = res; bws.onerror = rej; });
+const newTarget = await new Promise((res) => {
+  bws.onmessage = (ev) => res(JSON.parse(ev.data));
+  bws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'about:blank', newWindow: true, width: 1180, height: 820 } }));
+});
+bws.close();
+const targetId = newTarget.result.targetId;
 const targets = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
-const page = targets.find((t) => t.type === 'page');
+const page = targets.find((t) => t.id === targetId);
 if (!page) throw new Error('no page target');
 
 const ws = new WebSocket(page.webSocketDebuggerUrl);
