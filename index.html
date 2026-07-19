@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="型紙製図">
+<title>型紙製図</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header id="topbar">
+  <button id="btnList" title="製図一覧">≡</button>
+  <span id="drawingName">無題</span>
+  <span class="spacer"></span>
+  <button id="btnUndo" title="戻る">↩</button>
+  <button id="btnRedo" title="進む">↪</button>
+  <button id="btnExport" title="PNG書き出し">PNG</button>
+</header>
+
+<svg id="canvas">
+  <defs>
+    <pattern id="gridMinor" width="10" height="10" patternUnits="userSpaceOnUse">
+      <path id="gridMinorPath" d="M 10 0 L 0 0 0 10" fill="none" stroke="#cddff0"/>
+    </pattern>
+    <pattern id="gridMajor" width="50" height="50" patternUnits="userSpaceOnUse">
+      <path id="gridMajorPath" d="M 50 0 L 0 0 0 50" fill="none" stroke="#a3c4e0"/>
+    </pattern>
+  </defs>
+  <rect id="gridRectMinor" fill="url(#gridMinor)"/>
+  <rect id="gridRectMajor" fill="url(#gridMajor)"/>
+  <g id="linesLayer"></g>
+  <g id="labelsLayer"></g>
+  <g id="overlayLayer"></g>
+</svg>
+
+<footer id="toolbar">
+  <div class="group">
+    <button id="btnMove" class="tool">✋ 移動</button>
+    <button id="btnDraw" class="tool active">✏️ 線を引く</button>
+  </div>
+  <div class="group">
+    <button id="btnSolid" class="tool active">── 実線</button>
+    <button id="btnDashed" class="tool">┄┄ 点線</button>
+  </div>
+  <div class="group">
+    <label>長さ <input id="inpLen" type="number" inputmode="decimal" min="0" step="1"><span class="unit">mm</span></label>
+    <label>角度 <input id="inpAng" type="number" inputmode="decimal" step="1"><span class="unit">°</span></label>
+  </div>
+  <div class="group">
+    <button id="btnConfirm" class="primary hidden">確定</button>
+    <button id="btnCancel" class="hidden">✕</button>
+    <button id="btnDelete" class="danger hidden">削除</button>
+  </div>
+  <div id="hint"></div>
+</footer>
+
+<div id="listOverlay" class="hidden">
+  <div id="listPanel">
+    <div class="panel-header">
+      <h2>製図一覧</h2>
+      <button id="btnNew" class="primary">＋ 新規作成</button>
+      <button id="btnCloseList">✕</button>
+    </div>
+    <ul id="drawingList"></ul>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
